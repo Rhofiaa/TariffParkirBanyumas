@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+folium
+streamlit-folium
+streamlit-option-menu
+openpyxl
+python-dateutil
+pytz

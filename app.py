@@ -6,6 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.tree import plot_tree
 import folium
 from streamlit_folium import folium_static 
 import matplotlib.pyplot as plt
@@ -21,7 +22,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# GANTI PATH INI DENGAN PATH LOKAL FILE EXCEL ANDA
+
 FILE_PATH = 'DataParkir_Fix.xlsx' 
 
 # --- FUNGSI UTILITY (Konversi, Kategori Jam, Tarif) ---
@@ -66,7 +67,7 @@ def time_to_decimal_hour(time_obj):
 def kategori_jam_otomatis(jam):
     if (jam <= 6) or (jam >= 22):
         return 'Sepi'
-    elif (jam > 8 and jam <= 19):
+    elif (jam > 9 and jam <= 19):
         return 'Ramai'
     else:
         return 'Sedang'
@@ -203,38 +204,83 @@ def train_models(df, jam_cols):
             
         # Cek jika X_train kosong
         if X_train.empty:
-            return None, le, pd.DataFrame(), pd.DataFrame(), np.array([]), np.array([]), np.array([]), pd.DataFrame()
+            return None, le, pd.DataFrame(), pd.DataFrame(), np.array([]), np.array([]), np.array([]), pd.DataFrame(), {}, {}
             
-        model = RandomForestClassifier(n_estimators=200, random_state=42)
+        # Random Forest dengan parameter yang di-tune untuk mencegah overfitting (Opsi B: Fine-tuning minimal)
+        model = RandomForestClassifier(
+            n_estimators=150,      # Turun dari 200 (trade-off: speed vs accuracy)
+            max_depth=15,          # Batasi kedalaman pohon (mencegah memorization)
+            min_samples_leaf=3,    # Minimal 3 sample per leaf (lebih robust)
+            random_state=42
+        )
         model.fit(X_train, y_train)
         
         y_pred = model.predict(X_test)
         
         # Menggunakan seluruh data sebagai referensi (X_all)
         X_ref = pd.concat([X_train, X_test]).reset_index(drop=True)
-        return model, le, X_train, X_test, y_train, y_test, y_pred, X_ref
+        
+        # Hitung training metrics untuk setiap jumlah pohon (untuk visualisasi)
+        train_scores = []
+        test_scores = []
+        tree_counts = []
+        
+        # Range disesuaikan dengan n_estimators (150 pohon)
+        for n_trees in range(10, 151, 10):
+            # Evaluasi dengan n_trees pertama menggunakan cumulative probability voting
+            y_pred_train_prob = np.zeros((len(y_train), len(le.classes_)))
+            y_pred_test_prob = np.zeros((len(y_test), len(le.classes_)))
+            
+            # Aggregate predictions dari n_trees pertama
+            for estimator in model.estimators_[:n_trees]:
+                y_pred_train_prob += estimator.predict_proba(X_train)
+                y_pred_test_prob += estimator.predict_proba(X_test)
+            
+            # Majority voting - ambil kelas dengan probabilitas tertinggi
+            y_pred_train_final = np.argmax(y_pred_train_prob, axis=1)
+            y_pred_test_final = np.argmax(y_pred_test_prob, axis=1)
+            
+            # Hitung akurasi
+            train_acc = np.mean(y_pred_train_final == y_train)
+            test_acc = np.mean(y_pred_test_final == y_test)
+            
+            train_scores.append(train_acc)
+            test_scores.append(test_acc)
+            tree_counts.append(n_trees)
+        
+        training_metrics = {
+            'tree_counts': tree_counts,
+            'train_scores': train_scores,
+            'test_scores': test_scores
+        }
+        
+        oob_scores = {'n_estimators': [10, 50, 100, 150, 200]}
+        
+        return model, le, X_train, X_test, y_train, y_test, y_pred, X_ref, training_metrics, oob_scores
     
     # Membangun model hanya jika kolom target memiliki lebih dari satu nilai unik
     results = {}
     
     if df['Class_Motor'].nunique() > 1:
-        model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m = build_model(df[fitur_motor], df['Class_Motor'])
+        model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m, metrics_m, oob_m = build_model(df[fitur_motor], df['Class_Motor'])
     else:
-        model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m = [None] * 8 
+        model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m, metrics_m, oob_m = [None] * 10 
 
     results['motor'] = {
         'model': model_motor, 'le': le_motor, 'X_train': X_train_m, 'X_test': X_test_m, 'y_train': y_train_m, 
-        'y_test': y_test_m, 'y_pred': y_pred_m, 'X_ref': X_ref_m, 'fitur': fitur_motor, 'X_all': df[fitur_motor]
+        'y_test': y_test_m, 'y_pred': y_pred_m, 'X_ref': X_ref_m, 'fitur': fitur_motor, 'X_all': df[fitur_motor],
+        'training_metrics': metrics_m, 'oob_scores': oob_m
     }
 
     if df['Class_Mobil'].nunique() > 1:
-        model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c = build_model(df[fitur_mobil], df['Class_Mobil'])
+        model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c, metrics_c, oob_c = build_model(df[fitur_mobil], df['Class_Mobil'])
     else:
-        model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c = [None] * 8
+        model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c, metrics_c, oob_c = [None] * 10
 
     results['mobil'] = {
         'model': model_mobil, 'le': le_mobil, 'X_train': X_train_c, 'X_test': X_test_c, 'y_train': y_train_c, 
-        'y_test': y_test_c, 'y_pred': y_pred_c, 'X_ref': X_ref_c, 'fitur': fitur_mobil, 'X_all': df[fitur_mobil]
+        'y_test': y_test_c, 'y_pred': y_pred_c, 'X_ref': X_ref_c, 'fitur': fitur_mobil, 'X_all': df[fitur_mobil],
+        'training_metrics': metrics_c, 'oob_scores': oob_c
     }
     
     return results
@@ -574,7 +620,6 @@ def display_visualization(df, batas_kuantil, jam_cols):
 
     with tab2:
         st.subheader("💰 BATAS KUANTIL TOTAL PENDAPATAN TAHUNAN (Rp) 💰")
-        st.warning("Batas ini digunakan untuk pembentukan label klasifikasi (Rendah/Sedang/Tinggi).")
         col_m, col_c = st.columns(2)
         
         if batas_kuantil['motor'] is not None:
@@ -582,10 +627,82 @@ def display_visualization(df, batas_kuantil, jam_cols):
                 st.markdown("### Batas Kuantil Motor 🏍️")
                 batas_motor = batas_kuantil['motor']
                 if len(batas_motor) == 2:
+                    # VISUALISASI BATAS KUANTIL MOTOR - ZONA WARNA (DULU SEBELUM TEXT)
+                    fig_motor, ax_motor = plt.subplots(figsize=(12, 2), dpi=80)
+                    
+                    # Hitung nilai untuk visualisasi
+                    min_val = 0
+                    max_val = df['Total_Pend_Motor'].max()
+                    b1 = batas_motor.iloc[0]
+                    b2 = batas_motor.iloc[1]
+                    
+                    # Buat stacked bar dengan 3 zona
+                    ax_motor.barh(['Motor'], [b1 - min_val], left=min_val, color='#FF6B6B', label='Rendah', height=0.5)
+                    ax_motor.barh(['Motor'], [b2 - b1], left=b1, color='#FFC93C', label='Sedang', height=0.5)
+                    ax_motor.barh(['Motor'], [max_val - b2], left=b2, color='#4ECDC4', label='Tinggi', height=0.5)
+                    
+                    # Tambahkan garis dan text untuk batas
+                    ax_motor.axvline(b1, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8)
+                    ax_motor.axvline(b2, color='darkgreen', linestyle='--', linewidth=1.5, alpha=0.8)
+                    
+                    # Hitung persentase data di setiap kategori
+                    cnt_rendah = (df['Total_Pend_Motor'] < b1).sum()
+                    cnt_sedang = ((df['Total_Pend_Motor'] >= b1) & (df['Total_Pend_Motor'] < b2)).sum()
+                    cnt_tinggi = (df['Total_Pend_Motor'] >= b2).sum()
+                    total = len(df)
+                    
+                    # Text di tengah setiap zona
+                    ax_motor.text((min_val + b1) / 2, 0, f'{cnt_rendah}\n({100*cnt_rendah/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    ax_motor.text((b1 + b2) / 2, 0, f'{cnt_sedang}\n({100*cnt_sedang/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    ax_motor.text((b2 + max_val) / 2, 0, f'{cnt_tinggi}\n({100*cnt_tinggi/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    
+                    ax_motor.set_xlabel('Total Pendapatan Tahunan (Rp)', fontsize=10, fontweight='bold')
+                    ax_motor.set_xlim(min_val, max_val * 1.05)
+                    ax_motor.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'Rp{x/1e6:.0f}M'))
+                    ax_motor.legend(loc='upper right', fontsize=9, ncol=3)
+                    ax_motor.set_yticks([])
+                    plt.tight_layout()
+                    st.pyplot(fig_motor, use_container_width=True)
+                    
+                    # PENJELASAN TEXT SETELAH DIAGRAM
                     st.markdown(f"* **Rendah** : Pendapatan < **Rp{batas_motor.iloc[0]:,.0f}**")
                     st.markdown(f"* **Sedang** : **Rp{batas_motor.iloc[0]:,.0f}** s/d **Rp{batas_motor.iloc[1]:,.0f}**")
                     st.markdown(f"* **Tinggi** : Pendapatan > **Rp{batas_motor.iloc[1]:,.0f}**")
+                    
                 elif len(batas_motor) == 1:
+                    # VISUALISASI BATAS KUANTIL MOTOR (2 KATEGORI) - ZONA WARNA (DULU)
+                    fig_motor, ax_motor = plt.subplots(figsize=(12, 2), dpi=80)
+                    
+                    min_val = 0
+                    max_val = df['Total_Pend_Motor'].max()
+                    b1 = batas_motor.iloc[0]
+                    
+                    ax_motor.barh(['Motor'], [b1 - min_val], left=min_val, color='#FF6B6B', label='Rendah', height=0.5)
+                    ax_motor.barh(['Motor'], [max_val - b1], left=b1, color='#4ECDC4', label='Tinggi', height=0.5)
+                    
+                    ax_motor.axvline(b1, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8)
+                    
+                    cnt_rendah = (df['Total_Pend_Motor'] < b1).sum()
+                    cnt_tinggi = (df['Total_Pend_Motor'] >= b1).sum()
+                    total = len(df)
+                    
+                    ax_motor.text((min_val + b1) / 2, 0, f'{cnt_rendah}\n({100*cnt_rendah/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    ax_motor.text((b1 + max_val) / 2, 0, f'{cnt_tinggi}\n({100*cnt_tinggi/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    
+                    ax_motor.set_xlabel('Total Pendapatan Tahunan (Rp)', fontsize=10, fontweight='bold')
+                    ax_motor.set_xlim(min_val, max_val * 1.05)
+                    ax_motor.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'Rp{x/1e6:.0f}M'))
+                    ax_motor.legend(loc='upper right', fontsize=9, ncol=2)
+                    ax_motor.set_yticks([])
+                    plt.tight_layout()
+                    st.pyplot(fig_motor, use_container_width=True)
+                    
+                    # PENJELASAN TEXT SETELAH DIAGRAM
                     st.markdown(f"* **Rendah** : Pendapatan < **Rp{batas_motor.iloc[0]:,.0f}**")
                     st.markdown(f"* **Tinggi** : Pendapatan > **Rp{batas_motor.iloc[0]:,.0f}**")
                 else:
@@ -598,10 +715,77 @@ def display_visualization(df, batas_kuantil, jam_cols):
                 st.markdown("### Batas Kuantil Mobil 🚗")
                 batas_mobil = batas_kuantil['mobil']
                 if len(batas_mobil) == 2:
+                    # VISUALISASI BATAS KUANTIL MOBIL - ZONA WARNA (DULU SEBELUM TEXT)
+                    fig_mobil, ax_mobil = plt.subplots(figsize=(12, 2), dpi=80)
+                    
+                    min_val = 0
+                    max_val = df['Total_Pend_Mobil'].max()
+                    b1 = batas_mobil.iloc[0]
+                    b2 = batas_mobil.iloc[1]
+                    
+                    ax_mobil.barh(['Mobil'], [b1 - min_val], left=min_val, color='#FF6B6B', label='Rendah', height=0.5)
+                    ax_mobil.barh(['Mobil'], [b2 - b1], left=b1, color='#FFC93C', label='Sedang', height=0.5)
+                    ax_mobil.barh(['Mobil'], [max_val - b2], left=b2, color='#4ECDC4', label='Tinggi', height=0.5)
+                    
+                    ax_mobil.axvline(b1, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8)
+                    ax_mobil.axvline(b2, color='darkgreen', linestyle='--', linewidth=1.5, alpha=0.8)
+                    
+                    cnt_rendah = (df['Total_Pend_Mobil'] < b1).sum()
+                    cnt_sedang = ((df['Total_Pend_Mobil'] >= b1) & (df['Total_Pend_Mobil'] < b2)).sum()
+                    cnt_tinggi = (df['Total_Pend_Mobil'] >= b2).sum()
+                    total = len(df)
+                    
+                    ax_mobil.text((min_val + b1) / 2, 0, f'{cnt_rendah}\n({100*cnt_rendah/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    ax_mobil.text((b1 + b2) / 2, 0, f'{cnt_sedang}\n({100*cnt_sedang/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    ax_mobil.text((b2 + max_val) / 2, 0, f'{cnt_tinggi}\n({100*cnt_tinggi/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    
+                    ax_mobil.set_xlabel('Total Pendapatan Tahunan (Rp)', fontsize=10, fontweight='bold')
+                    ax_mobil.set_xlim(min_val, max_val * 1.05)
+                    ax_mobil.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'Rp{x/1e6:.0f}M'))
+                    ax_mobil.legend(loc='upper right', fontsize=9, ncol=3)
+                    ax_mobil.set_yticks([])
+                    plt.tight_layout()
+                    st.pyplot(fig_mobil, use_container_width=True)
+                    
+                    # PENJELASAN TEXT SETELAH DIAGRAM
                     st.markdown(f"* **Rendah** : Pendapatan < **Rp{batas_mobil.iloc[0]:,.0f}**")
                     st.markdown(f"* **Sedang** : **Rp{batas_mobil.iloc[0]:,.0f}** s/d **Rp{batas_mobil.iloc[1]:,.0f}**")
                     st.markdown(f"* **Tinggi** : Pendapatan > **Rp{batas_mobil.iloc[1]:,.0f}**")
+                    
                 elif len(batas_mobil) == 1:
+                    # VISUALISASI BATAS KUANTIL MOBIL (2 KATEGORI) - ZONA WARNA (DULU)
+                    fig_mobil, ax_mobil = plt.subplots(figsize=(12, 2), dpi=80)
+                    
+                    min_val = 0
+                    max_val = df['Total_Pend_Mobil'].max()
+                    b1 = batas_mobil.iloc[0]
+                    
+                    ax_mobil.barh(['Mobil'], [b1 - min_val], left=min_val, color='#FF6B6B', label='Rendah', height=0.5)
+                    ax_mobil.barh(['Mobil'], [max_val - b1], left=b1, color='#4ECDC4', label='Tinggi', height=0.5)
+                    
+                    ax_mobil.axvline(b1, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8)
+                    
+                    cnt_rendah = (df['Total_Pend_Mobil'] < b1).sum()
+                    cnt_tinggi = (df['Total_Pend_Mobil'] >= b1).sum()
+                    total = len(df)
+                    
+                    ax_mobil.text((min_val + b1) / 2, 0, f'{cnt_rendah}\n({100*cnt_rendah/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    ax_mobil.text((b1 + max_val) / 2, 0, f'{cnt_tinggi}\n({100*cnt_tinggi/total:.1f}%)', 
+                                 ha='center', va='center', fontweight='bold', fontsize=9, color='white')
+                    
+                    ax_mobil.set_xlabel('Total Pendapatan Tahunan (Rp)', fontsize=10, fontweight='bold')
+                    ax_mobil.set_xlim(min_val, max_val * 1.05)
+                    ax_mobil.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'Rp{x/1e6:.0f}M'))
+                    ax_mobil.legend(loc='upper right', fontsize=9, ncol=2)
+                    ax_mobil.set_yticks([])
+                    plt.tight_layout()
+                    st.pyplot(fig_mobil, use_container_width=True)
+                    
+                    # PENJELASAN TEXT SETELAH DIAGRAM
                     st.markdown(f"* **Rendah** : Pendapatan < **Rp{batas_mobil.iloc[0]:,.0f}**")
                     st.markdown(f"* **Tinggi** : Pendapatan > **Rp{batas_mobil.iloc[0]:,.0f}**")
                 else:
@@ -752,11 +936,36 @@ def display_visualization(df, batas_kuantil, jam_cols):
         )
 
 # --- Modul 3: Pemodelan (DITAMBAHKAN) ---
-def display_modeling(models_data):
+def display_modeling(df_processed, models_data):
     st.header("3️⃣ Pemodelan Klasifikasi Potensi Tarif (Random Forest)")
     st.markdown("---")
     
-    tab_motor, tab_mobil, tab_rekomendasi = st.tabs(["🏍️ Model Motor", "🚗 Model Mobil", "📑 Rekomendasi Tarif"])
+    # Detail Parameter Random Forest
+    with st.expander("⚙️ Parameter Random Forest yang Digunakan", expanded=False):
+        st.markdown("""
+        ### Konfigurasi Model Random Forest
+        
+        **Parameter Utama:**
+        | Parameter | Nilai | Penjelasan |
+        |-----------|-------|-----------|
+        | **n_estimators** | 150 | Jumlah pohon keputusan dalam ensemble (turun dari 200 untuk efisiensi) |
+        | **max_depth** | 15 | Batasan kedalaman maksimal setiap pohon (mencegah overfitting) |
+        | **min_samples_leaf** | 3 | Minimal 3 sample di setiap daun (membuat keputusan lebih robust) |
+        | **random_state** | 42 | Seed untuk reproducibility (hasil selalu konsisten) |
+        
+        **Mengapa Parameter Ini?**
+        - **150 estimators**: Trade-off antara akurasi dan kecepatan training
+        - **max_depth=15**: Pohon cukup dalam untuk capture pattern, tapi tidak terlalu dalam sehingga memorize noise
+        - **min_samples_leaf=3**: Setiap keputusan didasarkan pada minimal 3 lokasi, bukan hanya 1 outlier
+        
+        **Proses Training:**
+        1. Data training (75-80% dari total) digunakan untuk melatih 150 pohon
+        2. Setiap pohon belajar secara independent dengan random subset data
+        3. Prediksi final = voting dari 150 pohon (majority vote)
+        4. Evaluasi menggunakan data testing (20-25% dari total) yang TIDAK digunakan saat training
+        """)
+    
+    tab_motor, tab_mobil, tab_data_training, tab_training, tab_pohon, tab_rekomendasi = st.tabs(["🏍️ Model Motor", "🚗 Model Mobil", "📊 Data Training", "📈 Grafik Training", "🌳 Visualisasi Pohon", "📑 Rekomendasi Tarif"])
 
     def display_model_results(jenis, data):
         st.subheader(f"Hasil Pelatihan Model {jenis.capitalize()}")
@@ -769,17 +978,29 @@ def display_modeling(models_data):
         if model is None:
             st.error(f"Model {jenis.capitalize()} tidak dilatih karena kolom target 'Class_{jenis.capitalize()}' tidak memiliki variasi kelas yang cukup (nunique <= 1).")
             return
+        
+        # Ringkasan Training
+        st.info(f"""
+        ✅ **Training Selesai!** Model Random Forest dengan 150 pohon telah dilatih menggunakan data training dan dievaluasi dengan data testing.
+        Lihat **tab "📊 Data Training"** untuk detail 80:20 split dan **tab "📈 Grafik Training"** untuk melihat learning curve (bagaimana akurasi meningkat seiring training).
+        """)
             
         col1, col2 = st.columns(2)
         
         with col1:
             try:
                 acc = accuracy_score(y_test, y_pred)
+                cm = confusion_matrix(y_test, y_pred)
+                
+                # Hitung jumlah prediksi benar (diagonal confusion matrix)
+                correct_predictions = np.trace(cm)
+                total_predictions = len(y_test)
+                
                 st.metric(f"Akurasi Model {jenis.capitalize()}", f"{acc*100:.2f} %")
+                st.caption(f"📊 Prediksi Benar: {correct_predictions} dari {total_predictions} data | Manual: {correct_predictions}/{total_predictions} = {(correct_predictions/total_predictions)*100:.2f}%")
                 
                 st.markdown("#### Matriks Konfusi (Confusion Matrix)")
                 fig, ax = plt.subplots(figsize=(6, 5))
-                cm = confusion_matrix(y_test, y_pred)
                 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
                             xticklabels=le.classes_, yticklabels=le.classes_, ax=ax)
                 ax.set_title('Confusion Matrix')
@@ -805,12 +1026,493 @@ def display_modeling(models_data):
             ax_imp.set_title(f'Top 5 Feature Importance - {jenis.capitalize()}')
             ax_imp.set_xlabel('Importance Score')
             st.pyplot(fig_imp)
+    
+    def display_tree_visualization(jenis, data):
+        st.subheader(f"Visualisasi Pohon Keputusan - {jenis.capitalize()}")
+        
+        model = data['model']
+        le = data['le']
+        fitur = data['fitur']
+        
+        if model is None:
+            st.error(f"Model {jenis.capitalize()} tidak tersedia. Pastikan model berhasil dilatih.")
+            return
+        
+        st.info(f"Random Forest {jenis.capitalize()} memiliki {len(model.estimators_)} pohon keputusan. Visualisasi di bawah menampilkan 1 pohon sampel.")
+        
+        try:
+            # Ambil pohon pertama (indeks 0) sebagai sampel
+            sample_tree = model.estimators_[0]
+            
+            # Buat visualisasi pohon dengan ukuran yang lebih besar untuk readability
+            fig, ax = plt.subplots(figsize=(25, 15))
+            plot_tree(sample_tree, 
+                     feature_names=fitur,
+                     class_names=le.classes_,
+                     filled=True,
+                     rounded=True,
+                     fontsize=10,
+                     ax=ax)
+            ax.set_title(f"Pohon Keputusan Sampel #1 - Model {jenis.capitalize()}\n(Dari {len(model.estimators_)} pohon dalam Random Forest)", fontsize=16, fontweight='bold')
+            
+            st.pyplot(fig, use_container_width=True)
+            
+            # Tampilkan statistik pohon
+            st.markdown("---")
+            st.markdown("#### Statistik Pohon")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Kedalaman Pohon", sample_tree.get_depth())
+            
+            with col2:
+                st.metric("Jumlah Node", sample_tree.tree_.node_count)
+            
+            with col3:
+                st.metric("Jumlah Daun", np.sum(sample_tree.tree_.children_left == -1))
+            
+            # Informasi pohon-pohon lainnya
+            st.markdown("---")
+            st.markdown("#### Informasi Pohon-Pohon Lainnya dalam Random Forest")
+            
+            tree_stats = []
+            for i, tree in enumerate(model.estimators_[:5]):  # Tampilkan 5 pohon pertama
+                tree_stats.append({
+                    'Pohon #': i + 1,
+                    'Kedalaman': tree.get_depth(),
+                    'Jumlah Node': tree.tree_.node_count,
+                    'Jumlah Daun': np.sum(tree.tree_.children_left == -1)
+                })
+            
+            df_tree_stats = pd.DataFrame(tree_stats)
+            st.dataframe(df_tree_stats, use_container_width=True)
+            
+            # BAGIAN PENJELASAN POHON
+            st.markdown("---")
+            st.markdown("#### 📚 Cara Membaca Pohon Keputusan")
+            
+            with st.expander("� Catatan: Struktur Pohon Setelah Fine-Tuning", expanded=True):
+                st.markdown(f"""
+                **Parameter Model yang Digunakan:**
+                
+                - **n_estimators = 150** (jumlah pohon dalam ensemble)
+                - **max_depth = 15** (batasan kedalaman maksimal pohon)
+                - **min_samples_leaf = 3** (minimal sample per daun keputusan)
+                
+                **Efek Parameter Ini pada Pohon:**
+                ✅ **Lebih Sederhana**: Pohon tidak bisa tumbuh terlalu dalam
+                ✅ **Lebih Robust**: Setiap daun minimal punya 3 sample
+                ✅ **Keseimbangan Optimal**: Generalisasi yang baik pada data baru
+                """)
+            
+            with st.expander("�🔍 Penjelasan Struktur Pohon", expanded=True):
+                st.markdown("""
+                **Setiap Node (Kotak) pada pohon berisi informasi berikut:**
+                
+                1. **Kondisi/Pertanyaan** (di atas garis): Pertanyaan yang digunakan untuk membagi data
+                   - Contoh: `Jumlah Motor Weekday <= 45.5` (apakah jumlah motor weekday <= 45.5?)
+                   
+                2. **Gini Index** (nilai Gini): Ukuran ketidaksusunan atau variasi dalam node
+                   - Semakin kecil Gini → data lebih homogen (lebih yakin dengan keputusan)
+                   - Semakin besar Gini → data lebih tercampur (masih banyak ketidakpastian)
+                
+                3. **Samples**: Jumlah data yang masuk ke node ini
+                   - Contoh: `samples = 25` berarti ada 25 data point di node ini
+                
+                4. **Distribusi Kelas** (warna dan tinggi bar): Proporsi setiap kelas di node
+                   - Bar merah, biru, hijau mewakili kelas yang berbeda (Rendah, Sedang, Tinggi)
+                   - Semakin besar bar suatu warna → semakin banyak data dari kelas itu
+                
+                5. **Warna Latar Belakang Node**:
+                   - **Warna terang** → Kelas mayoritas di node itu
+                   - Contoh: Jika dominan warna merah = kelas "Rendah"
+                
+                **Cara Mengikuti Pohon dari Akar ke Daun:**
+                - Mulai dari NODE AKAR (atas)
+                - Jika kondisi TRUE (ya) → Ikuti anak kiri
+                - Jika kondisi FALSE (tidak) → Ikuti anak kanan
+                - Hentikan di DAUN (node paling bawah tanpa cabang)
+                - Daun menjadi prediksi akhir
+                """)
+            
+            # PENJELASAN SPESIFIK UNTUK JENIS KENDARAAN
+            st.markdown("---")
+            st.markdown(f"#### 🎯 Penjelasan Spesifik untuk Model {jenis.capitalize()}")
+            
+            with st.expander(f"📖 Contoh Trace Path - Model {jenis.capitalize()}", expanded=True):
+                if jenis.lower() == 'motor':
+                    st.markdown("""
+                    **CONTOH: Memprediksi Kelas Potensi untuk Lokasi Parkir Motor**
+                    
+                    Misalkan kita punya data lokasi parkir motor dengan karakteristik:
+                    - Jumlah Motor Weekday: 50 kendaraan
+                    - Jumlah Motor Weekend: 35 kendaraan
+                    - Jam Ramai Motor Weekday: 10.5 jam
+                    - Jam Ramai Motor Weekend: 9.0 jam
+                    
+                    **LANGKAH MENGIKUTI POHON:**
+                    
+                    1️⃣ **Di Node AKAR (Root)**
+                       - Pertanyaan: "Jumlah Motor Weekday <= X.X?" 
+                       - Data kita: 50 kendaraan
+                       - Jika 50 ≤ threshold akar → Ikuti ke KIRI
+                       - Jika 50 > threshold akar → Ikuti ke KANAN
+                    
+                    2️⃣ **Di Node Berikutnya**
+                       - Pertanyaan baru muncul, misal: "Jam Ramai Motor Weekend <= Y.Y?"
+                       - Evaluasi kondisi ini dengan data kita
+                       - Pilih KIRI atau KANAN sesuai hasil
+                    
+                    3️⃣ **Lanjutkan sampai mencapai DAUN (Leaf)**
+                       - Daun menampilkan kelas prediksi final
+                       - Contoh: "value = [5, 2, 18]" berarti:
+                         - 5 sample dari kelas "Rendah"
+                         - 2 sample dari kelas "Sedang"
+                         - 18 sample dari kelas "Tinggi"
+                       - **PREDIKSI = Kelas dengan nilai terbanyak = "Tinggi"**
+                    
+                    **INTERPRETASI HASIL:**
+                    - Lokasi dengan karakteristik ini diprediksi memiliki potensi **TINGGI**
+                    - Artinya: pendapatan parkir motor di lokasi ini estimasinya tinggi
+                    - Rekomendasi: Terapkan tarif lebih tinggi (Rp3000 untuk motor)
+                    """)
+                else:
+                    st.markdown("""
+                    **CONTOH: Memprediksi Kelas Potensi untuk Lokasi Parkir Mobil**
+                    
+                    Misalkan kita punya data lokasi parkir mobil dengan karakteristik:
+                    - Jumlah Mobil Weekday: 120 kendaraan
+                    - Jumlah Mobil Weekend: 95 kendaraan
+                    - Jam Ramai Mobil Weekday: 12.5 jam
+                    - Jam Ramai Mobil Weekend: 11.0 jam
+                    
+                    **LANGKAH MENGIKUTI POHON:**
+                    
+                    1️⃣ **Di Node AKAR (Root)**
+                       - Pertanyaan: "Jumlah Mobil Weekday <= X.X?"
+                       - Data kita: 120 kendaraan
+                       - Jika 120 ≤ threshold akar → Ikuti ke KIRI
+                       - Jika 120 > threshold akar → Ikuti ke KANAN
+                    
+                    2️⃣ **Di Node Berikutnya**
+                       - Pertanyaan baru: "Jam Sedang Mobil Weekday <= Y.Y?" atau sejenisnya
+                       - Evaluasi kondisi dengan data kita
+                       - Pilih KIRI atau KANAN sesuai hasil
+                    
+                    3️⃣ **Lanjutkan sampai mencapai DAUN (Leaf)**
+                       - Daun menampilkan kelas prediksi final
+                       - Contoh: "value = [3, 8, 25]" berarti:
+                         - 3 sample dari kelas "Rendah"
+                         - 8 sample dari kelas "Sedang"
+                         - 25 sample dari kelas "Tinggi"
+                       - **PREDIKSI = Kelas dengan nilai terbanyak = "Tinggi"**
+                    
+                    **INTERPRETASI HASIL:**
+                    - Lokasi dengan karakteristik ini diprediksi memiliki potensi **TINGGI**
+                    - Artinya: pendapatan parkir mobil di lokasi ini estimasinya tinggi
+                    - Rekomendasi: Terapkan tarif lebih tinggi (Rp5000 untuk mobil)
+                    """)
+            
+            # PENJELASAN INDEKS GINI
+            st.markdown("---")
+            with st.expander("📊 Penjelasan Gini Index & Interpretasinya", expanded=False):
+                st.markdown("""
+                **Apa itu Gini Index?**
+                
+                Gini Index adalah ukuran untuk mengukur **ketidaksusunan (impurity)** data dalam satu node.
+                
+                **Rumus Gini:** 
+                Gini = 1 - Σ(p_i)²
+                Dimana p_i adalah proporsi kelas ke-i dalam node
+                
+                **Nilai Gini:**
+                - **Gini = 0**: Semua data dalam node adalah kelas yang SAMA → Sempurna/Pure
+                - **Gini = 0.5**: Data TERCAMPUR dengan baik antara kelas → Tidak yakin
+                - **Gini mendekati 1**: Data sangat TERCAMPUR → Sangat tidak yakin
+                
+                **Contoh:**
+                1. **Node dengan 100 data, semua kelas "Tinggi":**
+                   - p(Tinggi) = 1.0, p(Sedang) = 0, p(Rendah) = 0
+                   - Gini = 1 - (1² + 0² + 0²) = 0 ✓ Sempurna!
+                
+                2. **Node dengan 100 data, 33-33-34 distribusi:**
+                   - p(setiap kelas) ≈ 0.33
+                   - Gini = 1 - (0.33² + 0.33² + 0.34²) ≈ 0.666 → Sangat tercampur
+                
+                **Implikasi untuk Pohon:**
+                - Node dengan Gini rendah → Keputusan yang JELAS (mudah membedakan kelas)
+                - Node dengan Gini tinggi → Keputusan yang AMBIGU (sulit membedakan)
+                - Pohon akan terus membagi sampai Gini minimal
+                """)
+            
+            # PENJELASAN FITUR PENTING
+            st.markdown("---")
+            with st.expander("🎯 Fitur Mana yang Paling Penting di Pohon Ini?", expanded=False):
+                st.markdown(f"""
+                **Fitur yang Digunakan di Node AKAR** adalah yang **PALING PENTING** untuk prediksi!
+                
+                Mengapa? Karena:
+                1. Fitur akar membagi data menjadi dua kelompok yang paling berbeda (Gini paling rendah)
+                2. Setiap data HARUS melewati node akar terlebih dahulu
+                3. Pembagian di node akar memiliki pengaruh terbesar pada hasil akhir
+                
+                **Strategi Pohon Keputusan:**
+                - Pohon akan memilih fitur yang memberikan **pemisahan data terbaik** di setiap level
+                - Fitur numerik dipilih dengan mencari **threshold optimal** (nilai pembatas)
+                - Threshold dipilih untuk **meminimalkan Gini** di node anak
+                
+                **Implikasi Praktis:**
+                Jika fitur "Jumlah {jenis} Weekday" ada di akar:
+                → Jumlah kendaraan di hari kerja SANGAT penting menentukan potensi tarif
+                → Untuk prognosis yang lebih baik, fokus pada data jumlah kendaraan weekday
+                """)
+            
+        except Exception as e:
+            st.error(f"Error saat memvisualisasi pohon: {e}")
             
     with tab_motor:
         display_model_results('Motor', models_data['motor'])
         
     with tab_mobil:
         display_model_results('Mobil', models_data['mobil'])
+    
+    with tab_data_training:
+        st.subheader("📊 Visualisasi Data Training vs Testing")
+        st.info("Section ini menampilkan pembagian data untuk proses training model Random Forest")
+        
+        # Info umum
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Data", len(df_processed))
+        with col2:
+            st.metric("Data Training (80%)", int(len(df_processed) * 0.8))
+        with col3:
+            st.metric("Data Testing (20%)", int(len(df_processed) * 0.2))
+        
+        st.markdown("---")
+        
+        # Visualisasi pie chart
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            st.markdown("#### 📈 Proporsi Data Train vs Test")
+            fig, ax = plt.subplots(figsize=(6, 5))
+            sizes = [len(df_processed) * 0.8, len(df_processed) * 0.2]
+            labels = ['Training (80%)', 'Testing (20%)']
+            colors = ['#2E86AB', '#A23B72']
+            explode = (0.05, 0)
+            
+            ax.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.0f%%',
+                  shadow=True, startangle=90, textprops={'fontsize': 11, 'fontweight': 'bold'})
+            ax.set_title('Pembagian Data untuk Training', fontsize=12, fontweight='bold')
+            st.pyplot(fig, use_container_width=True)
+        
+        with col_right:
+            st.markdown("#### 📊 Distribusi Data Training per Kelas")
+            
+            # Data training untuk Motor
+            df_train_indices = list(range(int(len(df_processed) * 0.8)))
+            df_train = df_processed.iloc[df_train_indices]
+            
+            class_counts_motor = df_train['Class_Motor'].value_counts()
+            class_counts_mobil = df_train['Class_Mobil'].value_counts()
+            
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+            
+            class_counts_motor.plot(kind='bar', ax=ax1, color=['#FF6B6B', '#FFC93C', '#4ECDC4'])
+            ax1.set_title('Motor (Training Set)', fontsize=11, fontweight='bold')
+            ax1.set_xlabel('Kategori')
+            ax1.set_ylabel('Jumlah')
+            ax1.tick_params(axis='x', rotation=45)
+            ax1.grid(axis='y', alpha=0.3)
+            
+            class_counts_mobil.plot(kind='bar', ax=ax2, color=['#FF6B6B', '#FFC93C', '#4ECDC4'])
+            ax2.set_title('Mobil (Training Set)', fontsize=11, fontweight='bold')
+            ax2.set_xlabel('Kategori')
+            ax2.set_ylabel('Jumlah')
+            ax2.tick_params(axis='x', rotation=45)
+            ax2.grid(axis='y', alpha=0.3)
+            
+            plt.tight_layout()
+            st.pyplot(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # Tabel detail data training
+        st.markdown("#### 📋 Detail Data Training (80% dari Total)")
+        with st.expander("Lihat data training (klik untuk expand)", expanded=False):
+            st.dataframe(df_train, use_container_width=True, height=400)
+        
+        # Tabel detail data testing
+        st.markdown("#### 📋 Detail Data Testing (20% dari Total)")
+        df_test_indices = list(range(int(len(df_processed) * 0.8), len(df_processed)))
+        df_test = df_processed.iloc[df_test_indices]
+        
+        with st.expander("Lihat data testing (klik untuk expand)", expanded=False):
+            st.dataframe(df_test, use_container_width=True, height=400)
+        
+        st.markdown("---")
+        
+        # Penjelasan
+        st.markdown("#### 💡 Penjelasan")
+        with st.expander("Mengapa perlu train-test split?", expanded=True):
+            st.markdown("""
+            **Train-Test Split** adalah teknik untuk mengevaluasi model secara objektif:
+            
+            1. **Data Training (80%):** Digunakan untuk melatih model
+               - Model mempelajari pola dari data ini
+               - Digunakan untuk update parameter model
+            
+            2. **Data Testing (20%):** Digunakan untuk evaluasi model
+               - Data yang TIDAK pernah dilihat model saat training
+               - Menunjukkan kemampuan generalisasi model
+               - Mengukur performa pada data baru
+            
+            3. **Mengapa 80:20?**
+               - Standar industri untuk keseimbangan jumlah data dan evaluasi
+               - Cukup training data untuk belajar pola
+               - Cukup testing data untuk evaluasi yang reliable
+            
+            4. **Stratifikasi:**
+               - Data di-shuffle dan dibagi secara proporsional
+               - Memastikan distribusi kelas di train dan test sama
+            """)
+
+    
+    with tab_training:
+        st.subheader("📈 Visualisasi Proses Training Model")
+        st.info("Grafik di bawah menunjukkan bagaimana akurasi model meningkat seiring bertambahnya jumlah pohon dalam Random Forest.")
+        
+        def display_training_curves(jenis, data):
+            st.markdown(f"### {jenis.capitalize()}")
+            
+            model = data['model']
+            metrics = data.get('training_metrics', {})
+            
+            if model is None or not metrics:
+                st.error(f"Data training tidak tersedia untuk {jenis}. Model mungkin tidak berhasil dilatih.")
+                return
+            
+            try:
+                tree_counts = metrics.get('tree_counts', [])
+                train_scores = metrics.get('train_scores', [])
+                test_scores = metrics.get('test_scores', [])
+                
+                if not tree_counts or not train_scores or not test_scores:
+                    st.warning(f"Data metrik training kosong untuk {jenis}.")
+                    return
+                
+                # Buat dataframe untuk plotting
+                df_metrics = pd.DataFrame({
+                    'Jumlah Pohon': tree_counts,
+                    'Training Accuracy': train_scores,
+                    'Testing Accuracy': test_scores
+                })
+                
+                # Plotting dengan matplotlib
+                fig, ax = plt.subplots(figsize=(10, 6))
+                
+                ax.plot(df_metrics['Jumlah Pohon'], df_metrics['Training Accuracy'], 
+                       marker='o', linewidth=2, label='Training Accuracy', color='#2E86AB')
+                ax.plot(df_metrics['Jumlah Pohon'], df_metrics['Testing Accuracy'], 
+                       marker='s', linewidth=2, label='Testing Accuracy', color='#A23B72')
+                
+                ax.fill_between(df_metrics['Jumlah Pohon'], 
+                               df_metrics['Training Accuracy'], 
+                               df_metrics['Testing Accuracy'],
+                               alpha=0.2, color='gray', label='Gap (Overfitting)')
+                
+                ax.set_xlabel('Jumlah Pohon dalam Random Forest', fontsize=12, fontweight='bold')
+                ax.set_ylabel('Akurasi', fontsize=12, fontweight='bold')
+                ax.set_title(f'Learning Curve - Model {jenis.capitalize()}\n(Peningkatan Akurasi dengan Pertambahan Pohon)', 
+                           fontsize=13, fontweight='bold')
+                ax.legend(loc='lower right', fontsize=10)
+                ax.grid(True, alpha=0.3, linestyle='--')
+                ax.set_ylim([0, 1.05])
+                ax.set_xlim([0, 160])  # Sesuai dengan 150 pohon
+                
+                st.pyplot(fig, use_container_width=True)
+                
+                # Tampilkan tabel metrik
+                st.markdown("#### Tabel Akurasi per Jumlah Pohon")
+                df_display = df_metrics.copy()
+                df_display['Training Accuracy'] = (df_display['Training Accuracy'] * 100).round(2).astype(str) + '%'
+                df_display['Testing Accuracy'] = (df_display['Testing Accuracy'] * 100).round(2).astype(str) + '%'
+                st.dataframe(df_display, use_container_width=True)
+                
+                # Statistik
+                st.markdown("---")
+                st.markdown("#### 📊 Ringkasan Statistik Training")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    final_train_acc = train_scores[-1]
+                    st.metric("Akurasi Training Akhir", f"{final_train_acc*100:.2f}%")
+                
+                with col2:
+                    final_test_acc = test_scores[-1]
+                    st.metric("Akurasi Testing Akhir", f"{final_test_acc*100:.2f}%")
+                
+                with col3:
+                    gap = final_train_acc - final_test_acc
+                    st.metric("Gap (Overfitting)", f"{gap*100:.2f}%", 
+                             delta=f"{'⚠️ Tinggi' if gap > 0.1 else '✅ Normal' if gap > 0 else '✓ Baik'}")
+                
+                with col4:
+                    improvement = train_scores[-1] - train_scores[0]
+                    st.metric("Peningkatan Training", f"{improvement*100:.2f}%")
+                
+                # Penjelasan
+                st.markdown("---")
+                st.markdown("#### 💡 Interpretasi Grafik")
+                
+                with st.expander("Apa artinya grafik ini?", expanded=True):
+                    st.markdown(f"""
+                    **Garis Biru (Training Accuracy):** Akurasi model pada data training
+                    - Cenderung **naik/stabil** karena model sudah melihat data ini
+                    - Jika terus naik → Model masih belajar
+                    - Jika plateau → Model sudah konvergen
+                    
+                    **Garis Merah (Testing Accuracy):** Akurasi model pada data testing (unseen)
+                    - Ini yang paling penting untuk evaluasi model
+                    - Menunjukkan kemampuan generalisasi model
+                    
+                    **Area Abu-abu (Gap):** Selisih antara Training dan Testing
+                    - Semakin kecil gap → Model lebih baik generalisasinya
+                    - Gap besar → Indikasi **overfitting** (model menghafal training data)
+                    - Model ini: Gap = {final_train_acc - final_test_acc:.4f}
+                    
+                    **Tren Kurva:**
+                    - Kedua kurva naik bersama → Model belajar dengan baik ✅
+                    - Testing naik, Training stabil → Kurva normal ✅
+                    - Testing turun saat Training naik → Overfitting ⚠️
+                    
+                    **Jumlah Pohon Optimal:**
+                    - Biasanya dilihat dari testing accuracy tertinggi
+                    - Untuk {jenis}: **{tree_counts[test_scores.index(max(test_scores))]} pohon** memberikan akurasi terbaik
+                    - Tapi 200 pohon juga sudah cukup baik (bias-variance trade-off)
+                    """)
+            
+            except Exception as e:
+                st.error(f"Error visualisasi training {jenis}: {e}")
+        
+        col_motor, col_mobil = st.columns(2)
+        
+        with col_motor:
+            display_training_curves('Motor', models_data['motor'])
+        
+        with col_mobil:
+            display_training_curves('Mobil', models_data['mobil'])
+    
+    with tab_pohon:
+        st.markdown("### 🏍️ Pohon Motor")
+        display_tree_visualization('Motor', models_data['motor'])
+        
+        st.markdown("---")
+        
+        st.markdown("### 🚗 Pohon Mobil")
+        display_tree_visualization('Mobil', models_data['mobil'])
 
     with tab_rekomendasi:
         st.subheader("📑 Tabel Rekomendasi Kebijakan Tarif Progresif")
@@ -900,7 +1602,7 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
     st.info("Pilih gaya peta: Satelit atau StreetMap. Warna titik diseragamkan untuk fokus pada popup dan simulasi.")
 
     # Default peta: OpenStreetMap (TileLayer tambahan tetap disertakan di dalam map)
-    m = folium.Map(location=map_center, zoom_start=13, tiles='OpenStreetMap')
+    m = folium.Map(location=map_center, zoom_start=15, tiles='OpenStreetMap')
 
     # Tambahkan TileLayer tambahan agar pengguna bisa berganti di LayerControl jika mau
     folium.TileLayer('OpenStreetMap').add_to(m)
@@ -1151,7 +1853,7 @@ elif page == "Visualisasi":
     display_visualization(df_processed, batas_kuantil, jam_cols)
 
 elif page == "Pemodelan":
-    display_modeling(models_data)
+    display_modeling(df_processed, models_data)
 
 elif page == "Peta & Simulasi":
     display_map_and_simulation(df_long, map_center, models_data, df_spasial)

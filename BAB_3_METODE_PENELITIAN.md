@@ -137,6 +137,10 @@ Tahap ini bertujuan untuk mengubah data mentah menjadi data yang bersih, konsist
 2. **Konversi Data Waktu**: Atribut rentang waktu (misal, "15.00–17.00") diubah menjadi nilai jam desimal rata-rata tunggal (misal, 16.0) menggunakan fungsi `convert_time_range()`. Nilai ini kemudian digunakan sebagai input kuantitatif pada model.
 3. **Imputasi Nilai Hilang**: Nilai yang hilang (NaN) pada kolom numerik seperti jumlah kendaraan, pendapatan, dan jam (desimal) diimputasi menggunakan median atau rata-rata tergantung distribusi data, untuk menjaga integritas statistik dataset.
 
+**Tahap Train-Test Split (Setelah Pembersihan, Sebelum Feature Engineering)**
+- Setelah data dibersihkan (langkah 1–3 di atas), dilakukan pemisahan data menjadi **train 80%** dan **test 20%** dengan **stratifikasi** berbasis label sementara (kuantil pendapatan) agar distribusi kelas seimbang.
+- Feature engineering (Total Pendapatan, Labeling kuantil) dan imputasi lanjutan hanya dihitung dari **data train**, lalu diaplikasikan ke data test untuk mencegah data leakage.
+
 #### 3.3.3.2. Rekayasa Fitur (Feature Engineering)
 
 1. **Pendapatan Total**: Kolom baru, `Total_Revenue_Motorcycle` dan `Total_Revenue_Car`, dihitung dengan mengakumulasi data pendapatan tahunan.

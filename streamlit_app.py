@@ -15,7 +15,7 @@ from folium.plugins import Search, Fullscreen, MiniMap
 from streamlit_option_menu import option_menu
 import re
 
-# --- Konfigurasi Halaman Streamlit ---
+#Konfigurasi Halaman Streamlit
 st.set_page_config(
     page_title="Dashboard Analisis Tarif Parkir",
     layout="wide", 
@@ -25,7 +25,16 @@ st.set_page_config(
 
 FILE_PATH = 'DataParkir_Fix.xlsx' 
 
-# --- FUNGSI UTILITY (Konversi, Kategori Jam, Tarif) ---
+#FUNGSI UTILITY (Konversi, Kategori Jam, Tarif)
+def desimal_to_hhmm(decimal_hour):
+    """Konversi desimal jam (11.875) ke format HH:MM (11:52)."""
+    hours = int(decimal_hour)
+    minutes = int(round((decimal_hour - hours) * 60))
+    if minutes == 60:
+        hours += 1
+        minutes = 0
+    return f"{hours:02d}:{minutes:02d}"
+
 def parse_time_to_decimal(time_str):
     """Mengkonversi string waktu (H.M, H:M, atau H) menjadi jam desimal."""
     try:
@@ -65,9 +74,9 @@ def time_to_decimal_hour(time_obj):
     return time_obj.hour + time_obj.minute / 60.0
 
 def kategori_jam_otomatis(jam):
-    if (jam <= 6) or (jam >= 22):
+    if (jam < 6) or (jam > 22):
         return 'Sepi'
-    elif (jam > 9 and jam <= 19):
+    elif (jam >= 9 and jam < 17):
         return 'Ramai'
     else:
         return 'Sedang'
@@ -77,7 +86,7 @@ tarif_mapping = {
     'Mobil': {'Rendah': 3000, 'Sedang': 4000, 'Tinggi': 5000}
 }
 
-# >>> FUNGSI BARU UNTUK TARIF PROGRESIF (Menjawab permintaan Dosen)
+#FUNGSI BARU UNTUK TARIF PROGRESIF
 def calculate_progresif_tarif(jenis, potensi_class, jam_desimal):
     """Menerapkan logika tarif progresif berdasarkan potensi dan jam."""
     tarif_dasar = tarif_mapping[jenis].get(potensi_class, 0)
@@ -93,7 +102,7 @@ def calculate_progresif_tarif(jenis, potensi_class, jam_desimal):
     else:
         return tarif_dasar
 
-# --- 2. Pemuatan dan Pembersihan Data (Caching) ---
+#2. Pemuatan dan Pembersihan Data (Caching)
 @st.cache_data
 def load_and_preprocess_data(file_path):
     try:
@@ -111,50 +120,52 @@ def load_and_preprocess_data(file_path):
     # Kolom Jumlah (Untuk Grafik Load)
     jumlah_cols = [c for c in df.columns if c.startswith('Jumlah')]
 
-    # Membersihkan dan konversi kolom pendapatan
+    # TAHAP 1: PEMBERSIHAN (sebelum split) - hanya konversi tipe data
     for c in pend_cols:
-        df[c] = df[c].astype(str).str.replace(r'[^\d,\.]', '', regex=True)
-        df[c] = df[c].str.replace('.', '', regex=False)
-        df[c] = df[c].str.replace(',', '.', regex=False)
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-    # Konversi dan Imputasi Jam (Menggunakan nilai mean jika NaN)
+    # Konversi Jam (tanpa imputasi - akan dilakukan setelah split)
     jam_cols = [c for c in df.columns if 'Jam' in c and 'per tahun' not in c]
     for col in jam_cols:
         df[col] = df[col].apply(konversi_jam)
-        df[col] = df[col].fillna(df[col].mean()) # Imputasi Mean/Median (Langkah Pre-processing)
+        # TIDAK imputasi dulu - akan dilakukan di train_models setelah split
 
-    # Imputasi Median untuk Kolom Numerik lainnya
-    for col in df.columns:
-        if df[col].dtype != 'object':
-            df[col] = df[col].fillna(df[col].median())
+    # Feature engineering dan labeling dipindahkan ke train_models setelah split
+    # Tapi simpan versi untuk visualisasi saja (gunakan full data)
+    df_display = df.copy()
+    
+    # Hitung Total Pendapatan HANYA untuk visualisasi
+    df_display['Total_Pend_Motor'] = (df_display['Pendapatan Tarif Parkir Weekday Motor per tahun'] + 
+                                       df_display['Pendapatan Tarif Parkir Weekend Motor per tahun'])
+    df_display['Total_Pend_Mobil'] = (df_display['Pendapatan Tarif Parkir Weekday Mobil per tahun'] + 
+                                      df_display['Pendapatan Tarif Parkir Weekend Mobil per tahun'])
+    
+    # Imputasi untuk visualisasi saja
+    for col in df_display.columns:
+        if df_display[col].dtype != 'object':
+            if col not in pend_cols:
+                df_display[col] = df_display[col].fillna(df_display[col].median())
         else:
             if col not in ['Titik', 'Class_Motor', 'Class_Mobil']:
-                 df[col] = df[col].fillna(df[col].mode()[0])
+                df_display[col] = df_display[col].fillna(df_display[col].mode()[0] if len(df_display[col].mode()) > 0 else 'Unknown')
 
-    # Menghitung Total Pendapatan
-    motor_pend_cols = [c for c in pend_cols if 'Motor' in c]
-    mobil_pend_cols = [c for c in pend_cols if 'Mobil' in c]
-    df['Total_Pend_Motor'] = df[motor_pend_cols].sum(axis=1) 
-    df['Total_Pend_Mobil'] = df[mobil_pend_cols].sum(axis=1) 
-
-    # Klasifikasi Potensi Tarif (Target)
+    # Labeling untuk visualisasi
     batas_motor = None
     batas_mobil = None
     
     try:
-        df['Class_Motor'] = pd.qcut(df['Total_Pend_Motor'], q=3, labels=['Rendah','Sedang','Tinggi'], duplicates='drop')
-        batas_motor = df['Total_Pend_Motor'].quantile([0.333, 0.666]).drop_duplicates().sort_values()
+        df_display['Class_Motor'] = pd.qcut(df_display['Total_Pend_Motor'], q=3, labels=['Rendah','Sedang','Tinggi'], duplicates='drop')
+        batas_motor = df_display['Total_Pend_Motor'].quantile([0.333, 0.666]).drop_duplicates().sort_values()
     except ValueError:
-        df['Class_Motor'] = pd.cut(df['Total_Pend_Motor'], bins=[-np.inf, df['Total_Pend_Motor'].median(), np.inf], labels=['Rendah', 'Tinggi']).fillna('Rendah')
-        batas_motor = df['Total_Pend_Motor'].quantile([0.5]).drop_duplicates().sort_values()
+        df_display['Class_Motor'] = pd.cut(df_display['Total_Pend_Motor'], bins=[-np.inf, df_display['Total_Pend_Motor'].median(), np.inf], labels=['Rendah', 'Tinggi']).fillna('Rendah')
+        batas_motor = df_display['Total_Pend_Motor'].quantile([0.5]).drop_duplicates().sort_values()
         
     try:
-        df['Class_Mobil'] = pd.qcut(df['Total_Pend_Mobil'], q=3, labels=['Rendah','Sedang','Tinggi'], duplicates='drop')
-        batas_mobil = df['Total_Pend_Mobil'].quantile([0.333, 0.666]).drop_duplicates().sort_values()
+        df_display['Class_Mobil'] = pd.qcut(df_display['Total_Pend_Mobil'], q=3, labels=['Rendah','Sedang','Tinggi'], duplicates='drop')
+        batas_mobil = df_display['Total_Pend_Mobil'].quantile([0.333, 0.666]).drop_duplicates().sort_values()
     except ValueError:
-        df['Class_Mobil'] = pd.cut(df['Total_Pend_Mobil'], bins=[-np.inf, df['Total_Pend_Mobil'].median(), np.inf], labels=['Rendah', 'Tinggi']).fillna('Rendah')
-        batas_mobil = df['Total_Pend_Mobil'].quantile([0.5]).drop_duplicates().sort_values()
+        df_display['Class_Mobil'] = pd.cut(df_display['Total_Pend_Mobil'], bins=[-np.inf, df_display['Total_Pend_Mobil'].median(), np.inf], labels=['Rendah', 'Tinggi']).fillna('Rendah')
+        batas_mobil = df_display['Total_Pend_Mobil'].quantile([0.5]).drop_duplicates().sort_values()
 
 
     if all(c in df.columns for c in ['Latitude', 'Longitude', 'Titik']):
@@ -165,84 +176,159 @@ def load_and_preprocess_data(file_path):
         df_spasial = df_spasial.dropna(subset=['Titik', 'Latitude', 'Longitude'])
         df_spasial = df_spasial.reset_index(drop=True)
 
-        # Juga hapus baris tanpa nama 'Titik' dari dataframe utama yang dipakai untuk preprocessed
-        # sehingga tab "Data Pre-processed" tidak menampilkan entri tanpa titik.
+        # Hapus baris tanpa nama 'Titik'
         before_drop = df.shape[0]
         df['Titik'] = df['Titik'].astype(str).str.strip()
         df = df.replace({'Titik': {'nan': None}})
         df = df.dropna(subset=['Titik']).reset_index(drop=True)
+        df_display['Titik'] = df_display['Titik'].astype(str).str.strip()
+        df_display = df_display.replace({'Titik': {'nan': None}})
+        df_display = df_display.dropna(subset=['Titik']).reset_index(drop=True)
         after_drop = df.shape[0]
-        # Catat penghapusan (opsional untuk debugging)
         st.session_state.setdefault('rows_dropped_no_titik', 0)
         st.session_state['rows_dropped_no_titik'] = before_drop - after_drop
     else:
         st.error("Kolom koordinat ('Titik', 'Latitude', 'Longitude') tidak ditemukan.")
         return None, None, None, None, None
     
-    return df, df_spasial, jam_cols, df_raw, {'motor': batas_motor, 'mobil': batas_mobil}
+    # Return: df (clean only), df_display (with features for viz), df_spasial, jam_cols, df_raw, batas
+    return df, df_display, df_spasial, jam_cols, df_raw, {'motor': batas_motor, 'mobil': batas_mobil}
+
 
 # --- 3. Pelatihan Model Random Forest (Caching) ---
 @st.cache_resource
 def train_models(df, jam_cols):
-    # Dihapus kolom 'per tahun' karena sudah diaggregasi ke Total_Pend
-    fitur_motor = ['Jumlah Motor Weekday', 'Jumlah Motor Weekend'] + [c for c in jam_cols if 'Motor' in c]
-    fitur_mobil = ['Jumlah Mobil Weekday', 'Jumlah Mobil Weekend'] + [c for c in jam_cols if 'Mobil' in c]
+    # Kolom pendapatan
+    pend_cols_motor = ['Pendapatan Tarif Parkir Weekday Motor per tahun', 'Pendapatan Tarif Parkir Weekend Motor per tahun']
+    pend_cols_mobil = ['Pendapatan Tarif Parkir Weekday Mobil per tahun', 'Pendapatan Tarif Parkir Weekend Mobil per tahun']
+    
+    # Kolom fitur dasar (sebelum feature engineering)
+    fitur_motor_base = ['Jumlah Motor Weekday', 'Jumlah Motor Weekend'] + [c for c in jam_cols if 'Motor' in c]
+    fitur_mobil_base = ['Jumlah Mobil Weekday', 'Jumlah Mobil Weekend'] + [c for c in jam_cols if 'Mobil' in c]
 
-    def build_model(X, y):
-        le = LabelEncoder()
-        # Hanya fit_transform jika ada lebih dari satu kelas
-        if len(y.unique()) > 1:
-            y_enc = le.fit_transform(y)
-        else:
-            y_enc = y 
-            
-        # Penanganan kasus ketika hanya ada satu kelas (stratifiy akan error)
-        if len(y.unique()) > 1 and all(y.value_counts() > 1):
-            X_train, X_test, y_train, y_test = train_test_split(X, y_enc, test_size=0.2, random_state=42, stratify=y_enc)
-        else:
-            X_train, X_test, y_train, y_test = train_test_split(X, y_enc, test_size=0.2, random_state=42)
-            
-        # Cek jika X_train kosong
-        if X_train.empty:
-            return None, le, pd.DataFrame(), pd.DataFrame(), np.array([]), np.array([]), np.array([]), pd.DataFrame(), {}, {}
-            
-        # Random Forest dengan parameter yang di-tune untuk mencegah overfitting (Opsi B: Fine-tuning minimal)
-        model = RandomForestClassifier(
-            n_estimators=150,      # Turun dari 200 (trade-off: speed vs accuracy)
-            max_depth=15,          # Batasi kedalaman pohon (mencegah memorization)
-            min_samples_leaf=3,    # Minimal 3 sample per leaf (lebih robust)
-            random_state=42
-        )
-        model.fit(X_train, y_train)
+    def build_model(df_input, fitur_cols, pend_cols, vehicle_type='motor'):
+        # TAHAP 0: Hitung label SEMENTARA untuk stratifikasi
+        df_temp = df_input.copy()
+        df_temp['Total_Pend_temp'] = df_temp[pend_cols[0]] + df_temp[pend_cols[1]]
         
+        try:
+            label_temp = pd.qcut(df_temp['Total_Pend_temp'], q=3, labels=['Rendah','Sedang','Tinggi'], duplicates='drop')
+        except:
+            label_temp = pd.cut(df_temp['Total_Pend_temp'], bins=[-np.inf, df_temp['Total_Pend_temp'].median(), np.inf], labels=['Rendah', 'Tinggi'])
+        
+        # TAHAP 1: SPLIT dengan STRATIFIKASI
+        try:
+            train_idx, test_idx = train_test_split(
+                df_input.index, 
+                test_size=0.2, 
+                random_state=42,
+                stratify=label_temp
+            )
+        except:
+            train_idx, test_idx = train_test_split(
+                df_input.index, 
+                test_size=0.2, 
+                random_state=42
+            )
+        
+        df_train = df_input.loc[train_idx].copy()
+        df_test = df_input.loc[test_idx].copy()
+        
+        # TAHAP 2: FEATURE ENGINEERING (terpisah untuk train dan test)
+        df_train['Total_Pend'] = df_train[pend_cols[0]] + df_train[pend_cols[1]]
+        df_test['Total_Pend'] = df_test[pend_cols[0]] + df_test[pend_cols[1]]
+        
+        # TAHAP 3: IMPUTASI menggunakan statistik TRAIN saja
+        impute_values = {}
+        for col in fitur_cols:
+            if df_train[col].isna().any():
+                impute_values[col] = df_train[col].median()
+        
+        # Apply imputasi
+        df_train[fitur_cols] = df_train[fitur_cols].fillna(impute_values)
+        df_test[fitur_cols] = df_test[fitur_cols].fillna(impute_values)
+        
+        # TAHAP 4: LABELING menggunakan threshold TRAIN saja
+        le = LabelEncoder()
+        quantile_thresholds = None
+        
+        try:
+            # Hitung quantile dari TRAIN
+            labels = pd.qcut(df_train['Total_Pend'], q=3, labels=['Rendah','Sedang','Tinggi'], duplicates='drop')
+            quantiles = df_train['Total_Pend'].quantile([0.333, 0.666]).values
+            quantile_thresholds = quantiles
+            
+            # Apply ke train
+            df_train['Class'] = labels
+            
+            # Apply threshold train ke test
+            if len(quantiles) == 2:
+                df_test['Class'] = pd.cut(
+                    df_test['Total_Pend'], 
+                    bins=[-np.inf, quantiles[0], quantiles[1], np.inf],
+                    labels=['Rendah','Sedang','Tinggi']
+                )
+            else:
+                median_val = df_train['Total_Pend'].median()
+                quantile_thresholds = np.array([median_val])
+                df_train['Class'] = pd.cut(df_train['Total_Pend'], bins=[-np.inf, median_val, np.inf], labels=['Rendah', 'Tinggi'])
+                df_test['Class'] = pd.cut(df_test['Total_Pend'], bins=[-np.inf, median_val, np.inf], labels=['Rendah', 'Tinggi'])
+        except:
+            median_val = df_train['Total_Pend'].median()
+            quantile_thresholds = np.array([median_val])
+            df_train['Class'] = pd.cut(df_train['Total_Pend'], bins=[-np.inf, median_val, np.inf], labels=['Rendah', 'Tinggi']).fillna('Rendah')
+            df_test['Class'] = pd.cut(df_test['Total_Pend'], bins=[-np.inf, median_val, np.inf], labels=['Rendah', 'Tinggi']).fillna('Rendah')
+        
+        # Encode labels
+        y_train = df_train['Class']
+        y_test = df_test['Class']
+        
+        if len(y_train.unique()) <= 1:
+            return None, le, pd.DataFrame(), pd.DataFrame(), np.array([]), np.array([]), np.array([]), pd.DataFrame(), {}, {}, None
+        
+        y_train_enc = le.fit_transform(y_train)
+        y_test_enc = le.transform(y_test)
+        
+        X_train = df_train[fitur_cols]
+        X_test = df_test[fitur_cols]
+        
+        # TAHAP 5: TRAINING MODEL
+        # Hyperparameter sama untuk Motor dan Mobil
+        model = RandomForestClassifier(
+            n_estimators=150,
+            max_depth=15,
+            min_samples_split=2,
+            min_samples_leaf=3,
+            bootstrap=True,
+            random_state=42,
+            criterion='gini'
+        )
+        
+        model.fit(X_train, y_train_enc)
         y_pred = model.predict(X_test)
         
-        # Menggunakan seluruh data sebagai referensi (X_all)
+        # Metrics untuk visualisasi
         X_ref = pd.concat([X_train, X_test]).reset_index(drop=True)
-        
-        # Hitung training metrics untuk setiap jumlah pohon (untuk visualisasi)
         train_scores = []
         test_scores = []
         tree_counts = []
         
-        # Range disesuaikan dengan n_estimators (150 pohon)
-        for n_trees in range(10, 151, 10):
-            # Evaluasi dengan n_trees pertama menggunakan cumulative probability voting
-            y_pred_train_prob = np.zeros((len(y_train), len(le.classes_)))
-            y_pred_test_prob = np.zeros((len(y_test), len(le.classes_)))
+        n_est = model.n_estimators
+        
+        # Range dari 10, 20, ..., 150 (bukan dari 1)
+        for n_trees in range(10, n_est+1, 10):
+            y_pred_train_prob = np.zeros((len(y_train_enc), len(le.classes_)))
+            y_pred_test_prob = np.zeros((len(y_test_enc), len(le.classes_)))
             
-            # Aggregate predictions dari n_trees pertama
             for estimator in model.estimators_[:n_trees]:
                 y_pred_train_prob += estimator.predict_proba(X_train)
                 y_pred_test_prob += estimator.predict_proba(X_test)
             
-            # Majority voting - ambil kelas dengan probabilitas tertinggi
             y_pred_train_final = np.argmax(y_pred_train_prob, axis=1)
             y_pred_test_final = np.argmax(y_pred_test_prob, axis=1)
             
-            # Hitung akurasi
-            train_acc = np.mean(y_pred_train_final == y_train)
-            test_acc = np.mean(y_pred_test_final == y_test)
+            train_acc = np.mean(y_pred_train_final == y_train_enc)
+            test_acc = np.mean(y_pred_test_final == y_test_enc)
             
             train_scores.append(train_acc)
             test_scores.append(test_acc)
@@ -254,113 +340,176 @@ def train_models(df, jam_cols):
             'test_scores': test_scores
         }
         
-        oob_scores = {'n_estimators': [10, 50, 100, 150, 200]}
+        oob_scores = {'n_estimators': [10, 50, 100, 150]}
         
-        return model, le, X_train, X_test, y_train, y_test, y_pred, X_ref, training_metrics, oob_scores
+        return model, le, X_train, X_test, y_train_enc, y_test_enc, y_pred, X_ref, training_metrics, oob_scores, quantile_thresholds
     
-    # Membangun model hanya jika kolom target memiliki lebih dari satu nilai unik
+    # Membangun model (data clean tanpa fitur/label - akan dibuat di dalam build_model)
     results = {}
     
-    if df['Class_Motor'].nunique() > 1:
-        model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m, metrics_m, oob_m = build_model(df[fitur_motor], df['Class_Motor'])
-    else:
-        model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m, metrics_m, oob_m = [None] * 10 
+    # Build model motor
+    model_motor, le_motor, X_train_m, X_test_m, y_train_m, y_test_m, y_pred_m, X_ref_m, metrics_m, oob_m, thresh_m = build_model(
+        df, fitur_motor_base, pend_cols_motor, vehicle_type='motor'
+    )
 
     results['motor'] = {
         'model': model_motor, 'le': le_motor, 'X_train': X_train_m, 'X_test': X_test_m, 'y_train': y_train_m, 
-        'y_test': y_test_m, 'y_pred': y_pred_m, 'X_ref': X_ref_m, 'fitur': fitur_motor, 'X_all': df[fitur_motor],
-        'training_metrics': metrics_m, 'oob_scores': oob_m
+        'y_test': y_test_m, 'y_pred': y_pred_m, 'X_ref': X_ref_m, 'fitur': fitur_motor_base, 
+        'X_all': df[fitur_motor_base] if model_motor else pd.DataFrame(),
+        'training_metrics': metrics_m, 'oob_scores': oob_m, 'quantile_thresholds': thresh_m
     }
 
-    if df['Class_Mobil'].nunique() > 1:
-        model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c, metrics_c, oob_c = build_model(df[fitur_mobil], df['Class_Mobil'])
-    else:
-        model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c, metrics_c, oob_c = [None] * 10
+    # Build model mobil
+    model_mobil, le_mobil, X_train_c, X_test_c, y_train_c, y_test_c, y_pred_c, X_ref_c, metrics_c, oob_c, thresh_c = build_model(
+        df, fitur_mobil_base, pend_cols_mobil, vehicle_type='mobil'
+    )
 
     results['mobil'] = {
         'model': model_mobil, 'le': le_mobil, 'X_train': X_train_c, 'X_test': X_test_c, 'y_train': y_train_c, 
-        'y_test': y_test_c, 'y_pred': y_pred_c, 'X_ref': X_ref_c, 'fitur': fitur_mobil, 'X_all': df[fitur_mobil],
-        'training_metrics': metrics_c, 'oob_scores': oob_c
+        'y_test': y_test_c, 'y_pred': y_pred_c, 'X_ref': X_ref_c, 'fitur': fitur_mobil_base, 
+        'X_all': df[fitur_mobil_base] if model_mobil else pd.DataFrame(),
+        'training_metrics': metrics_c, 'oob_scores': oob_c, 'quantile_thresholds': thresh_c
     }
     
     return results
 
 # Fungsi Prediksi untuk Simulasi
-def predict_single_input(jenis, hari, jam_input, jumlah_input, model, le, X_ref): 
+def predict_single_input(jenis, hari, jam_input, jumlah_input, model, le, X_ref, quantile_thresholds, baseline_data=None): 
+    """Prediksi menggunakan Random Forest yang sudah dilatih."""
     if model is None:
-        # Fallback jika model gagal
-        return "Model Gagal", 0.0, pd.Series({"No Model": 0}), {"Error": 1.0}, "Tidak ada model yang terlatih"
+        return "Model Gagal", 0.0, pd.Series({"No Model": 0}), {"Error": 1.0}, "Tidak ada model yang terlatih", None, None
 
     kategori_jam = kategori_jam_otomatis(jam_input)
     prefix = jenis
     
-    # Menggunakan mean dari X_ref (SELURUH DATA latih + uji)
-    data_baru = pd.DataFrame([X_ref.mean()], columns=X_ref.columns)
+    # Menggunakan baseline_data jika tersedia, jika tidak gunakan mean dari X_ref
+    if baseline_data is not None:
+        data_baru = pd.DataFrame([baseline_data], columns=X_ref.columns)
+    else:
+        data_baru = pd.DataFrame([X_ref.mean()], columns=X_ref.columns)
     
+    # Update kolom jumlah kendaraan sesuai input
     kolom_jumlah = f'Jumlah {prefix} {hari}'
-    if kolom_jumlah in data_baru.columns: data_baru[kolom_jumlah] = jumlah_input
+    if kolom_jumlah in data_baru.columns: 
+        data_baru[kolom_jumlah] = jumlah_input
     
-    # Kolom fitur jam yang diisi adalah kolom yang sesuai dengan kategori jam otomatis
+    # Update kolom jam sesuai kategori
     kolom_jam_input = f'Jam {kategori_jam} {prefix} {hari}'
-    
-    # Pastikan kolom jam yang relevan ada sebelum diisi
     if kolom_jam_input in data_baru.columns: 
         data_baru[kolom_jam_input] = jam_input
-    else:
-        # Jika kolom tidak ada, ini mungkin karena ada inkonsistensi nama kolom
-        pass # Biarkan nilai mean-nya
     
-    # Keterangan Logika Jam
+    # ESTIMASI PENDAPATAN berdasarkan input
+    tarif_wd = 2000 if jenis == 'Motor' else 3000
+    tarif_we = 2500 if jenis == 'Motor' else 4000
+    
+    if hari == "Weekday":
+        estimated_revenue = jumlah_input * 52 * (5/7) * tarif_wd
+    else:
+        estimated_revenue = jumlah_input * 52 * (2/7) * tarif_we
+    
+    # KLASIFIKASI berdasarkan threshold
+    threshold_class = None
+    if quantile_thresholds is not None and len(quantile_thresholds) == 2:
+        if estimated_revenue <= quantile_thresholds[0]:
+            threshold_class = 'Rendah'
+        elif estimated_revenue <= quantile_thresholds[1]:
+            threshold_class = 'Sedang'
+        else:
+            threshold_class = 'Tinggi'
+    
     keterangan_jam = f"Input jam **{jam_input:.2f}** dikategorikan sebagai **'{kategori_jam}'**."
 
     try:
+        # PREDIKSI MENGGUNAKAN RANDOM FOREST
         pred_encoded = model.predict(data_baru)[0]
         pred_class = le.inverse_transform([pred_encoded])[0]
         proba = model.predict_proba(data_baru)[0]
         confidence = proba[pred_encoded] 
         
-        # Implementasi Local Gain (Sederhana)
+        # Feature importance
         global_importance = pd.Series(model.feature_importances_, index=model.feature_names_in_)
-        
-        # Menghitung perbedaan data input dengan rata-rata, dikalikan importance
         local_gain_calc = (data_baru.iloc[0] - X_ref.mean()) * global_importance
         top_gain = local_gain_calc.abs().sort_values(ascending=False).head(3)
         
         proba_dict = dict(zip(le.classes_, proba))
         
-        return pred_class, confidence, top_gain, proba_dict, keterangan_jam
+        return pred_class, confidence, top_gain, proba_dict, keterangan_jam, estimated_revenue, threshold_class
     except Exception as e:
-        return f"Error Prediksi: {e}", 0.0, pd.Series({"Error": 0}), {"Error": 1.0}, keterangan_jam
-
-# --- Modul 1: Data Table (DITAMBAHKAN) ---
-def display_data_table(df_raw, df_processed):
-    st.header("1️⃣ Data Mentah & Data Pre-processed")
-    st.markdown("---")
+        return f"Error Prediksi: {e}", 0.0, pd.Series({"Error": 0}), {"Error": 1.0}, keterangan_jam, None, None
     
-    tab_raw, tab_processed = st.tabs(["📁 Data Mentah", "✨ Data Pre-processed"])
+    if hari == "Weekday":
+        estimated_revenue = jumlah_input * 52 * (5/7) * tarif_wd
+    else:
+        estimated_revenue = jumlah_input * 52 * (2/7) * tarif_we
+    
+    # KLASIFIKASI berdasarkan threshold
+    threshold_class = None
+    if quantile_thresholds is not None and len(quantile_thresholds) == 2:
+        if estimated_revenue <= quantile_thresholds[0]:
+            threshold_class = 'Rendah'
+        elif estimated_revenue <= quantile_thresholds[1]:
+            threshold_class = 'Sedang'
+        else:
+            threshold_class = 'Tinggi'
+    
+    keterangan_jam = f"Input jam **{jam_input:.2f}** dikategorikan sebagai **'{kategori_jam}'**."
 
-    with tab_raw:
-        st.subheader("Data Mentah (Original)")
-        st.info("Data asli sebelum dilakukan pembersihan, konversi, dan imputasi (nilai NaN masih terlihat).")
-        st.dataframe(df_raw, use_container_width=True)
-
-    with tab_processed:
-        st.subheader("Data Pre-processed (Siap untuk Pemodelan)")
-        st.info("Data setelah dibersihkan, dikonversi ke numerik, imputasi, dan ditambahkan kolom **Total Pendapatan** serta **Class Potensi** (Target Klasifikasi).")
-        st.dataframe(df_processed, use_container_width=True)
-
-        st.markdown("---")
-        st.subheader("Ringkasan Statistik Kolom Penting")
+    try:
+        # PREDIKSI MENGGUNAKAN RANDOM FOREST
+        pred_encoded = model.predict(data_baru)[0]
+        pred_class = le.inverse_transform([pred_encoded])[0]
+        proba = model.predict_proba(data_baru)[0]
+        confidence = proba[pred_encoded] 
         
-        col_m, col_c = st.columns(2)
+        # Feature importance
+        global_importance = pd.Series(model.feature_importances_, index=model.feature_names_in_)
+        local_gain_calc = (data_baru.iloc[0] - X_ref.mean()) * global_importance
+        top_gain = local_gain_calc.abs().sort_values(ascending=False).head(3)
         
-        with col_m:
-            st.markdown("#### Statistik Total Pendapatan Motor")
-            st.dataframe(df_processed['Total_Pend_Motor'].describe().to_frame(), use_container_width=True)
+        proba_dict = dict(zip(le.classes_, proba))
+        
+        return pred_class, confidence, top_gain, proba_dict, keterangan_jam, estimated_revenue, threshold_class
+    except Exception as e:
+        return f"Error Prediksi: {e}", 0.0, pd.Series({"Error": 0}), {"Error": 1.0}, keterangan_jam, None, None
+
+
+# === MODUL 1: DISPLAY DATA TABLE ===
+def display_data_table(df_raw, df_processed):
+        # Buat tabs untuk raw dan processed data
+        tab_raw, tab_processed = st.tabs(["📋 Data Mentah (Raw)", "✅ Data Pre-processed"])
+        
+        with tab_raw:
+            st.subheader("Data Mentah (Raw Data)")
+            st.info("Data asli dari file Excel tanpa pembersihan atau pemrosesan.")
+            st.dataframe(df_raw, use_container_width=True)
             
-        with col_c:
-            st.markdown("#### Statistik Total Pendapatan Mobil")
-            st.dataframe(df_processed['Total_Pend_Mobil'].describe().to_frame(), use_container_width=True)
+            st.markdown("---")
+            st.markdown("#### Informasi Dataset Mentah")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Jumlah Baris", df_raw.shape[0])
+            with col2:
+                st.metric("Jumlah Kolom", df_raw.shape[1])
+            with col3:
+                st.metric("Jumlah Missing Values", df_raw.isna().sum().sum())
+        
+        with tab_processed:
+            st.subheader("Data Pre-processed (Siap untuk Pemodelan)")
+            st.info("Data setelah dibersihkan, dikonversi ke numerik, imputasi, dan ditambahkan kolom **Total Pendapatan** serta **Class Potensi** (Target Klasifikasi).")
+            st.dataframe(df_processed, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("Ringkasan Statistik Kolom Penting")
+            
+            col_m, col_c = st.columns(2)
+            
+            with col_m:
+                st.markdown("#### Statistik Total Pendapatan Motor")
+                st.dataframe(df_processed['Total_Pend_Motor'].describe().to_frame(), use_container_width=True)
+                
+            with col_c:
+                st.markdown("#### Statistik Total Pendapatan Mobil")
+                st.dataframe(df_processed['Total_Pend_Mobil'].describe().to_frame(), use_container_width=True)
 
 
 # --- FUNGSI PENDUKUNG VISUALISASI ---
@@ -950,19 +1099,25 @@ def display_modeling(df_processed, models_data):
         |-----------|-------|-----------|
         | **n_estimators** | 150 | Jumlah pohon keputusan dalam ensemble (turun dari 200 untuk efisiensi) |
         | **max_depth** | 15 | Batasan kedalaman maksimal setiap pohon (mencegah overfitting) |
+        | **min_samples_split** | 2 | Minimal 2 sample untuk membagi node (default sklearn) |
         | **min_samples_leaf** | 3 | Minimal 3 sample di setiap daun (membuat keputusan lebih robust) |
+        | **bootstrap** | True | Gunakan bootstrap sampling untuk setiap pohon |
         | **random_state** | 42 | Seed untuk reproducibility (hasil selalu konsisten) |
+        | **criterion** | gini | Metrik untuk mengukur kualitas split (Gini impurity) |
         
         **Mengapa Parameter Ini?**
         - **150 estimators**: Trade-off antara akurasi dan kecepatan training
         - **max_depth=15**: Pohon cukup dalam untuk capture pattern, tapi tidak terlalu dalam sehingga memorize noise
+        - **min_samples_split=2**: Default sklearn, mengizinkan split dengan minimal 2 sample
         - **min_samples_leaf=3**: Setiap keputusan didasarkan pada minimal 3 lokasi, bukan hanya 1 outlier
+        - **bootstrap=True**: Setiap pohon dilatih dengan subset data berbeda (sampling with replacement)
+        - **criterion=gini**: Menggunakan Gini impurity untuk memilih split terbaik
         
         **Proses Training:**
-        1. Data training (75-80% dari total) digunakan untuk melatih 150 pohon
-        2. Setiap pohon belajar secara independent dengan random subset data
+        1. Data training (80% dari total) digunakan untuk melatih 150 pohon
+        2. Setiap pohon belajar secara independent dengan random bootstrap subset data
         3. Prediksi final = voting dari 150 pohon (majority vote)
-        4. Evaluasi menggunakan data testing (20-25% dari total) yang TIDAK digunakan saat training
+        4. Evaluasi menggunakan data testing (20% dari total) yang TIDAK digunakan saat training
         """)
     
     tab_motor, tab_mobil, tab_data_training, tab_training, tab_pohon, tab_rekomendasi = st.tabs(["🏍️ Model Motor", "🚗 Model Mobil", "📊 Data Training", "📈 Grafik Training", "🌳 Visualisasi Pohon", "📑 Rekomendasi Tarif"])
@@ -1022,7 +1177,12 @@ def display_modeling(df_processed, models_data):
             st.markdown("#### Feature Importance")
             importance = pd.Series(model.feature_importances_, index=data['fitur']).sort_values(ascending=False).head(5)
             fig_imp, ax_imp = plt.subplots(figsize=(7, 5))
-            sns.barplot(x=importance.values, y=importance.index, ax=ax_imp, palette='magma')
+            bars = sns.barplot(x=importance.values, y=importance.index, ax=ax_imp, palette='magma')
+            
+            # Tambahkan nilai di setiap bar
+            for i, (idx, value) in enumerate(importance.items()):
+                ax_imp.text(value + 0.002, i, f'{value:.4f}', va='center', fontsize=10, fontweight='bold')
+            
             ax_imp.set_title(f'Top 5 Feature Importance - {jenis.capitalize()}')
             ax_imp.set_xlabel('Importance Score')
             st.pyplot(fig_imp)
@@ -1053,6 +1213,22 @@ def display_modeling(df_processed, models_data):
                      rounded=True,
                      fontsize=10,
                      ax=ax)
+            
+            # Post-process: Konversi desimal jam ke HH:MM
+            import re
+            for text_obj in ax.texts:
+                text_str = text_obj.get_text()
+                if text_str:
+                    # Cari pattern desimal jam hanya jika sebelumnya ada "Jam" (nama fitur)
+                    # Pattern: "Jam ... <= 11.875" atau "Jam ... >= 15.5"
+                    modified_text = re.sub(
+                        r'(Jam [A-Za-z\s]+[<>=]+\s)(\d{1,2}\.\d+)',
+                        lambda m: f"{m.group(1)}{desimal_to_hhmm(float(m.group(2)))}" if 0 <= float(m.group(2)) <= 23.999 else m.group(0),
+                        text_str
+                    )
+                    if modified_text != text_str:
+                        text_obj.set_text(modified_text)
+            
             ax.set_title(f"Pohon Keputusan Sampel #1 - Model {jenis.capitalize()}\n(Dari {len(model.estimators_)} pohon dalam Random Forest)", fontsize=16, fontweight='bold')
             
             st.pyplot(fig, use_container_width=True)
@@ -1695,6 +1871,18 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
         key='sim_titik_select'
     )
     
+    # Deteksi perubahan lokasi dan reset input ke default lokasi baru
+    if 'last_selected_titik' not in st.session_state:
+        st.session_state.last_selected_titik = selected_titik
+    
+    if st.session_state.last_selected_titik != selected_titik:
+        # Lokasi berubah, reset semua input ke default lokasi baru
+        st.session_state.last_selected_titik = selected_titik
+        st.session_state.sim_jenis_override = 'Motor'
+        st.session_state.sim_hari_override = 'Weekday'
+        st.session_state.sim_jam_override = None
+        st.session_state.sim_jumlah_override = None
+    
     # Ambil data agregat dari titik yang dipilih
     default_data = df_spasial[df_spasial['Titik'] == selected_titik].iloc[0]
     
@@ -1709,32 +1897,55 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
 
         col1, col2, col3, col4, col5 = st.columns(5)
         
+        # Tentukan jenis dan hari (bisa di-override oleh session state)
+        jenis_default = st.session_state.get('sim_jenis_override', 'Motor')
+        hari_default = st.session_state.get('sim_hari_override', 'Weekday')
+        
         with col1: 
-            jenis = st.selectbox("Jenis Kendaraan", ['Motor', 'Mobil'], key='sim_jenis', help="Pilih jenis kendaraan yang ingin disimulasikan.")
+            jenis = st.selectbox("Jenis Kendaraan", ['Motor', 'Mobil'], 
+                               index=['Motor', 'Mobil'].index(jenis_default),
+                               key='sim_jenis', help="Pilih jenis kendaraan yang ingin disimulasikan.")
         with col2: 
-            hari = st.selectbox("Hari", ['Weekday', 'Weekend'], key='sim_hari', help="Pilih apakah hari kerja atau akhir pekan.")
+            hari = st.selectbox("Hari", ['Weekday', 'Weekend'], 
+                              index=['Weekday', 'Weekend'].index(hari_default),
+                              key='sim_hari', help="Pilih apakah hari kerja atau akhir pekan.")
+        
+        # Update default berdasarkan jenis dan hari yang dipilih saat ini
+        jam_key = f'Jam Ramai {jenis} {hari}'
+        jumlah_key = f'Jumlah {jenis} {hari}'
+        default_jam_current = default_data.get(jam_key, 9.0)
+        default_jumlah_current = default_data.get(jumlah_key, 100)
+        
         with col3: 
-            # Menggunakan nilai default jam yang lebih aman
-            jam_for_time_input = default_jam_val
+            # Menggunakan nilai default jam berdasarkan jenis dan hari
+            jam_for_time_input = st.session_state.get('sim_jam_override', default_jam_current)
+            if jam_for_time_input is None:
+                jam_for_time_input = default_jam_current
             try:
                 time_obj_default = datetime.time(int(jam_for_time_input // 1), int((jam_for_time_input % 1) * 60))
-            except ValueError:
+            except (ValueError, TypeError):
                 time_obj_default = datetime.time(9, 0) # Fallback ke jam 9 pagi
                 
             time_obj = st.time_input(
                 "Jam (HH:MM)", 
                 value=time_obj_default, 
                 step=datetime.timedelta(minutes=1), # Mengizinkan input per menit
-                key='sim_jam_time', 
+                key=f'sim_jam_time_{selected_titik}_{jenis}_{hari}',  # Key unik per lokasi/jenis/hari
                 help="Waktu parkir (Format 24 jam)."
             )
             jam_desimal_input = time_to_decimal_hour(time_obj) 
             st.caption(f"Nilai Jam Model: **{jam_desimal_input:.2f}**") 
             
         with col4: 
-            # Menggunakan nilai rata-rata jumlah kendaraan di lokasi yang dipilih sebagai default
-            default_jumlah = default_data.get(f'Jumlah {jenis} {hari}', 100)
-            jumlah_input = st.number_input(f"Jumlah {jenis} (Estimasi)", min_value=1, max_value=500, value=int(default_jumlah), key='sim_jumlah', help=f"Estimasi jumlah {jenis} yang parkir pada jam tersebut.")
+            # Menggunakan nilai jumlah kendaraan di lokasi yang dipilih sebagai default
+            jumlah_for_input = st.session_state.get('sim_jumlah_override', default_jumlah_current)
+            if jumlah_for_input is None:
+                jumlah_for_input = default_jumlah_current
+            jumlah_input = st.number_input(f"Jumlah {jenis} (Estimasi)", 
+                                          min_value=1, max_value=500, 
+                                          value=int(jumlah_for_input), 
+                                          key=f'sim_jumlah_{selected_titik}_{jenis}_{hari}',  # Key unik per lokasi/jenis/hari
+                                          help=f"Estimasi jumlah {jenis} yang parkir pada jam tersebut.")
         with col5: 
             st.markdown("<br>", unsafe_allow_html=True) 
             submitted = st.button("Prediksi Hasil 🚀", key='sim_submit', type='primary')
@@ -1742,9 +1953,21 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
         if submitted:
             data = models_data['motor'] if jenis == 'Motor' else models_data['mobil']
             
-            # Panggil fungsi prediksi
-            pred_class, confidence, top_gain, proba_dict, keterangan_jam = predict_single_input(
-                jenis, hari, jam_desimal_input, jumlah_input, data['model'], data['le'], data['X_ref']
+            # Siapkan baseline data dari lokasi yang dipilih (default_data)
+            # Konversi ke format yang sesuai dengan fitur model
+            baseline_row = default_data[data['fitur']].to_dict() if all(f in default_data.index for f in data['fitur']) else None
+            
+            # Auto-seragamkan semua kolom jumlah untuk jenis ini dengan input jumlah
+            if baseline_row is not None:
+                jumlah_cols = [c for c in baseline_row.keys() if c.startswith(f'Jumlah {jenis}')]
+                for c in jumlah_cols:
+                    baseline_row[c] = jumlah_input
+
+            # Panggil fungsi prediksi Random Forest
+            pred_class, confidence, top_gain, proba_dict, keterangan_jam, estimated_revenue, threshold_class = predict_single_input(
+                jenis, hari, jam_desimal_input, jumlah_input, 
+                data['model'], data['le'], data['X_ref'], data['quantile_thresholds'],
+                baseline_data=baseline_row
             )
             
             if not isinstance(pred_class, str) or "Error" in pred_class or "Model Gagal" in pred_class:
@@ -1755,11 +1978,11 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
                 rekomendasi_tarif_progresif = calculate_progresif_tarif(jenis, pred_class, jam_desimal_input)
                 
                 st.markdown("---")
-                col_res1, col_res2, col_res3 = st.columns(3)
-                col_res1.metric("Kategori Potensi Tarif (Simulasi)", f"Potensi {pred_class.upper()}", delta=f"Confidence: {confidence:.3f}")
-                col_res2.metric("Rekomendasi Tarif Dasar", f"Rp{rekomendasi_tarif_dasar:,}", delta=f"Kelas: {pred_class}")
                 
-                col_res3.metric("Rekomendasi Tarif PROGRESIF", f"Rp{rekomendasi_tarif_progresif:,}", delta=f"Kenaikan: Rp{rekomendasi_tarif_progresif - rekomendasi_tarif_dasar:,}")
+                col_res1, col_res2, col_res3 = st.columns(3)
+                col_res1.metric("Prediksi Model RF", f"Potensi {pred_class.upper()}", delta=f"Confidence: {confidence:.3f}")
+                col_res2.metric("Rekomendasi Tarif Dasar", f"Rp{rekomendasi_tarif_dasar:,}", delta=f"Kelas: {pred_class}")
+                col_res3.metric("Tarif PROGRESIF", f"Rp{rekomendasi_tarif_progresif:,}", delta=f"+Rp{rekomendasi_tarif_progresif - rekomendasi_tarif_dasar:,}")
                 
                 st.markdown("---")
                 col_info1, col_info2 = st.columns(2)
@@ -1767,6 +1990,7 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
                 with col_info1:
                     st.markdown("**Penjelasan Logika Waktu:**")
                     st.info(keterangan_jam)
+                    
                     st.markdown("**Top 3 Kontributor (Local Gain):**")
                     if isinstance(top_gain, pd.Series):
                         for f in top_gain.index: st.markdown(f"- **{f}** (Pendorong utama prediksi)")
@@ -1782,12 +2006,12 @@ def display_map_and_simulation(df_long, map_center, models_data, df_spasial):
 # =================================================================
 
 # Load Data dan Model
-df_processed, df_spasial, jam_cols, df_raw, batas_kuantil = load_and_preprocess_data(FILE_PATH)
+df_clean, df_processed, df_spasial, jam_cols, df_raw, batas_kuantil = load_and_preprocess_data(FILE_PATH)
 if df_processed is None: 
     st.error(f"Gagal memuat atau memproses data. Pastikan file '{FILE_PATH}' ada dan formatnya benar, serta mengandung kolom spasial (Titik, Latitude, Longitude).")
     st.stop()
 
-models_data = train_models(df_processed, jam_cols)
+models_data = train_models(df_clean, jam_cols)  # Pass clean data (no features/labels yet)
 
 # --- Prediksi Statis untuk Peta ---
 df_long = pd.DataFrame()
